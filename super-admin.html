@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Süper Admin | Kantin360 Kontrol</title>
+    
+    <script type="module">
+        // Güvenlik Kontrolü: Giriş yapılmamışsa süper-login'e atar
+        if (sessionStorage.getItem("superAdminToken") !== "verified_success") {
+            window.location.href = "super-login.html";
+        }
+
+        import { 
+            db, setDoc, doc, collection, onSnapshot, deleteDoc 
+        } from './firebase-config.js';
+
+        // --- OKUL OLUŞTURMA ---
+        window.createSchool = async function() {
+            const name = document.getElementById('schoolName').value;
+            const slug = document.getElementById('schoolSlug').value;
+            const pass = document.getElementById('adminPass').value;
+            const msg = document.getElementById('msg');
+
+            if(!name || !slug || !pass) return alert("Eksik bilgi!");
+
+            try {
+                await setDoc(doc(db, "schools", slug), {
+                    name: name,
+                    password: pass,
+                    created_at: new Date(),
+                    active: true
+                });
+                msg.innerHTML = `<span style="color:green">✅ ${name} eklendi! Link: index.html?id=${slug}</span>`;
+            } catch (e) { msg.innerHTML = `<span style="color:red">Hata: ${e.message}</span>`; }
+        }
+
+        // --- OKULLARI LİSTELE ---
+        onSnapshot(collection(db, "schools"), (snap) => {
+            const tbody = document.getElementById('listBody');
+            tbody.innerHTML = '';
+            snap.forEach(d => {
+                const data = d.data();
+                tbody.innerHTML += `
+                    <tr>
+                        <td><b>${data.name}</b></td>
+                        <td><code>${d.id}</code></td>
+                        <td><code>${data.password}</code></td>
+                        <td><button class="btn-del" onclick="deleteSchool('${d.id}')">Sistemden Sil</button></td>
+                    </tr>`;
+            });
+        });
+
+        window.deleteSchool = async (id) => {
+            if(confirm("Bu okulu ve tüm verilerini silmek istediğinize emin misiniz?")) {
+                await deleteDoc(doc(db, "schools", id));
+            }
+        };
+
+        window.logoutSuper = () => {
+            sessionStorage.clear();
+            window.location.href = "super-login.html";
+        };
+
+        // ID Oluşturucu
+        document.getElementById('schoolName').oninput = (e) => {
+            document.getElementById('schoolSlug').value = e.target.value.toLowerCase()
+                .replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
+        };
+    </script>
+
+    <style>
+        :root { --p: #0284c7; --bg: #f8fafc; --dark: #0f172a; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: var(--bg); }
+        .nav { background: var(--dark); color: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; }
+        .container { padding: 30px; max-width: 1000px; margin: 0 auto; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 25px; border: 1px solid #e2e8f0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #f1f5f9; }
+        th { background: #f8fafc; color: #64748b; font-size: 0.8rem; text-transform: uppercase; }
+        input { padding: 12px; margin-right: 10px; border: 1px solid #ddd; border-radius: 6px; width: 200px; }
+        button { padding: 12px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; background: var(--p); color: white; }
+        .btn-del { background: #ef4444; padding: 6px 12px; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+
+    <nav class="nav">
+        <h2 style="margin:0;">Kantin360 | Master Kontrol</h2>
+        <button onclick="logoutSuper()" style="background:#475569;">Çıkış Yap</button>
+    </nav>
+
+    <div class="container">
+        <div class="card">
+            <h3>🏢 Yeni Okul/Kantin Tanımla</h3>
+            <input type="text" id="schoolName" placeholder="Okul Adı">
+            <input type="text" id="schoolSlug" placeholder="ID (Otomatik)" readonly style="background:#f1f5f9;">
+            <input type="password" id="adminPass" placeholder="Yönetici Şifresi">
+            <button onclick="createSchool()">Sistemi Kur</button>
+            <div id="msg" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="card">
+            <h3>📋 Mevcut Müşteriler (Okullar)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Okul Adı</th>
+                        <th>Kısa Kod (ID)</th>
+                        <th>Şifre</th>
+                        <th>İşlem</th>
+                    </tr>
+                </thead>
+                <tbody id="listBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+</body>
+</html>

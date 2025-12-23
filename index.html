@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Kantin360 | Yönetim Paneli</title>
+    
+    <script type="module">
+        import { 
+            db, collection, addDoc, onSnapshot, doc, getDoc, query, orderBy, limit 
+        } from './firebase-config.js';
+
+        // --- GLOBAL DEĞİŞKENLER ---
+        const urlParams = new URLSearchParams(window.location.search);
+        let schoolId = urlParams.get('id') || localStorage.getItem("loggedSchoolId");
+        let products = [];
+        let cart = [];
+
+        // --- SİSTEMİ BAŞLAT ---
+        async function init() {
+            if (!schoolId) { window.location.href = "login.html"; return; }
+            try {
+                const schoolRef = doc(db, "schools", schoolId);
+                const snap = await getDoc(schoolRef);
+                if (snap.exists()) {
+                    document.getElementById('displaySchoolName').innerText = snap.data().name;
+                    localStorage.setItem("loggedSchoolId", schoolId);
+                    loadData();
+                } else {
+                    alert("Okul Bulunamadı!");
+                    logout();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        function loadData() {
+            // Ürünler
+            onSnapshot(collection(db, "schools", schoolId, "products"), (snap) => {
+                products = [];
+                snap.forEach(d => products.push({id: d.id, ...d.data()}));
+                renderProducts();
+                document.getElementById('loading').style.display = 'none';
+            });
+            // Son Satışlar
+            const salesQuery = query(collection(db, "schools", schoolId, "sales"), orderBy("date", "desc"), limit(10));
+            onSnapshot(salesQuery, (snap) => {
+                const recentList = document.getElementById('recentSalesList');
+                recentList.innerHTML = '';
+                snap.forEach(d => {
+                    const data = d.data();
+                    recentList.innerHTML += `<div class="sale-log"><span>${data.note || 'Genel'}</span> <b>${data.total.toFixed(2)}₺</b></div>`;
+                });
+            });
+        }
+
+        // --- FONKSİYONLAR ---
+        window.renderProducts = () => {
+            const grid = document.getElementById('productGrid');
+            grid.innerHTML = products.map(p => `
+                <div class="product-card" onclick="addToCart('${p.id}')">
+                    <h3>${p.name}</h3>
+                    <p>${p.price.toFixed(2)} ₺</p>
+                </div>
+            `).join('');
+        };
+
+        window.addToCart = (id) => {
+            const p = products.find(x => x.id === id);
+            const item = cart.find(x => x.id === id);
+            if(item) item.qty++; else cart.push({...p, qty: 1});
+            updateCartUI();
+        };
+
+        window.updateQty = (index, delta) => {
+            cart[index].qty += delta;
+            if(cart[index].qty <= 0) cart.splice(index, 1);
+            updateCartUI();
+        };
+
+        function updateCartUI() {
+            const list = document.getElementById('cartList');
+            let total = 0;
+            list.innerHTML = cart.map((item, i) => {
+                total += item.price * item.qty;
+                return `<div class="cart-item"><span>${item.name} (x${item.qty})</span><b>${(item.price * item.qty).toFixed(2)}₺</b></div>`;
+            }).join('');
+            document.getElementById('totalAmount').innerText = total.toFixed(2);
+        }
+
+        window.processSale = async (type) => {
+            if(cart.length === 0) return;
+            const note = type === 'Veresiye' ? prompt("Müşteri Adı:") : "";
+            const total = cart.reduce((s, i) => s + (i.price * i.qty), 0);
+            await addDoc(collection(db, "schools", schoolId, "sales"), { items: cart, total, type, note, date: new Date() });
+            cart = []; updateCartUI(); alert("Satış Başarılı!");
+        };
+
+        window.addNewProduct = async () => {
+            const name = document.getElementById('newPName').value;
+            const price = parseFloat(document.getElementById('newPPrice').value);
+            if(name && price) {
+                await addDoc(collection(db, "schools", schoolId, "products"), { name, price });
+                document.getElementById('newPName').value = ''; document.getElementById('newPPrice').value = '';
+            }
+        };
+
+        window.switchTab = (tab) => {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+            document.getElementById(tab).classList.add('active');
+            event.currentTarget.classList.add('active');
+        };
+
+        window.logout = () => { localStorage.removeItem("loggedSchoolId"); window.location.href = "login.html"; };
+
+        init();
+    </script>
+
+    <style>
+        :root { --primary: #0284c7; --bg: #f8fafc; --dark: #0f172a; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: var(--bg); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* ÜST MENÜ (HEADER) */
+        .navbar { background: var(--dark); color: white; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; height: 70px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .logo { font-weight: 800; font-size: 1.4rem; color: var(--primary); }
+        .school-name { font-weight: 400; font-size: 1.1rem; color: #fff; margin-left: 15px; }
+
+        /* MODÜL BUTONLARI */
+        .nav-links { display: flex; gap: 5px; height: 100%; align-items: center; }
+        .nav-link { padding: 0 20px; height: 70px; line-height: 70px; color: #94a3b8; cursor: pointer; transition: 0.3s; font-weight: 500; border-bottom: 4px solid transparent; }
+        .nav-link:hover { color: white; background: #1e293b; }
+        .nav-link.active { color: white; border-bottom-color: var(--primary); background: #1e293b; }
+
+        /* ANA İÇERİK */
+        .main-container { flex: 1; overflow: hidden; padding: 20px; }
+        .tab-content { display: none; height: 100%; }
+        .tab-content.active { display: block; }
+
+        /* POS DÜZENİ */
+        .pos-grid { display: grid; grid-template-columns: 1fr 380px; gap: 20px; height: 100%; }
+        .products-area { overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 15px; align-content: start; padding-right: 10px; }
+        .cart-area { background: white; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; flex-direction: column; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+
+        /* KARTLAR */
+        .product-card { background: white; padding: 20px; border-radius: 10px; border: 1px solid #e2e8f0; text-align: center; cursor: pointer; transition: 0.15s; }
+        .product-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+        .product-card h3 { margin: 0; font-size: 1rem; color: #334155; }
+        .product-card p { color: var(--primary); font-weight: bold; margin-top: 5px; }
+
+        /* SEPET DETAY */
+        .cart-list { flex: 1; overflow-y: auto; margin: 15px 0; border-top: 1px solid #f1f5f9; }
+        .cart-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f8fafc; font-size: 0.9rem; }
+        .btn-pay { padding: 14px; border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; margin-bottom: 8px; transition: 0.2s; }
+        .btn-pay:active { transform: scale(0.98); }
+
+        /* FORM VE DİĞER */
+        .card { background: white; padding: 25px; border-radius: 12px; border: 1px solid #e2e8f0; max-width: 600px; }
+        input { padding: 12px; margin-bottom: 12px; width: 100%; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
+        .sale-log { display: flex; justify-content: space-between; padding: 12px; background: #f8fafc; border-radius: 8px; margin-bottom: 8px; }
+
+        #loading { position: fixed; inset: 0; background: white; z-index: 1000; display: flex; justify-content: center; align-items: center; }
+    </style>
+</head>
+<body>
+
+    <div id="loading"><h1>Kantin360 Yükleniyor...</h1></div>
+
+    <nav class="navbar">
+        <div style="display: flex; align-items: center;">
+            <div class="logo">KANTİN360</div>
+            <div class="school-name" id="displaySchoolName">Okul Yükleniyor...</div>
+        </div>
+
+        <div class="nav-links">
+            <div class="nav-link active" onclick="switchTab('pos')">POS Satış</div>
+            <div class="nav-link" onclick="switchTab('inventory')">Ürün Yönetimi</div>
+            <div class="nav-link" onclick="switchTab('reports')">Günlük Rapor</div>
+            <div class="nav-link" style="color: #ef4444;" onclick="logout()">Güvenli Çıkış</div>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <div id="pos" class="tab-content active">
+            <div class="pos-grid">
+                <div class="products-area" id="productGrid"></div>
+                
+                <div class="cart-area">
+                    <h3 style="margin-top: 0;">🛒 Güncel Sepet</h3>
+                    <div class="cart-list" id="cartList"></div>
+                    <div style="font-size: 1.8rem; font-weight: 800; margin-bottom: 20px; text-align: right; color: var(--dark);">
+                        <small style="font-size: 0.9rem; font-weight: 400;">Toplam:</small> <span id="totalAmount">0.00</span>₺
+                    </div>
+                    <button class="btn-pay" style="background: #10b981;" onclick="processSale('Nakit')">NAKİT ÖDEME</button>
+                    <button class="btn-pay" style="background: #3b82f6;" onclick="processSale('Kart')">KREDİ KARTI</button>
+                    <button class="btn-pay" style="background: #f59e0b;" onclick="processSale('Veresiye')">VERESİYE DEFTERİ</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="inventory" class="tab-content">
+            <div class="card">
+                <h2>📦 Yeni Ürün Ekle</h2>
+                <p style="color: #64748b; margin-bottom: 20px;">Sisteme yeni bir ürün tanımladığınızda anında POS ekranına düşer.</p>
+                <input type="text" id="newPName" placeholder="Ürün Adı (Örn: Kaşarlı Tost)">
+                <input type="number" id="newPPrice" placeholder="Satış Fiyatı (₺)">
+                <button class="btn-pay" style="background: var(--primary); width: 100%;" onclick="addNewProduct()">Ürünü Kaydet ve Yayınla</button>
+            </div>
+        </div>
+
+        <div id="reports" class="tab-content">
+            <div class="card" style="max-width: 800px;">
+                <h2>📊 Son Satış İşlemleri</h2>
+                <div id="recentSalesList"></div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
