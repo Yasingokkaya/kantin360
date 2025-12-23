@@ -1,11 +1,24 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-// Firestore fonksiyonlarına orderBy ve limit ekledik:
+// Firestore için gerekli tüm modüller (increment, orderBy, limit dahil) buradan eklenmiştir
 import { 
-    getFirestore, collection, addDoc, getDocs, doc, 
-    setDoc, getDoc, updateDoc, query, where, onSnapshot, 
-    deleteDoc, orderBy, limit 
+    getFirestore, 
+    collection, 
+    addDoc, 
+    getDocs, 
+    doc, 
+    setDoc, 
+    getDoc, 
+    updateDoc, 
+    query, 
+    where, 
+    onSnapshot, 
+    deleteDoc, 
+    orderBy, 
+    limit, 
+    increment 
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
+// Projenize özel Firebase yapılandırma bilgileri
 const firebaseConfig = {
   apiKey: "AIzaSyC5dhh0gf_udX0Whljv9YZmygMGFAChIBg",
   authDomain: "kantin360-8901f.firebaseapp.com",
@@ -16,12 +29,25 @@ const firebaseConfig = {
   measurementId: "G-9GVKJ3T7MX"
 };
 
+// Firebase uygulamasını başlat
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// Hepsini dışarı aktarıyoruz ki index.html veya diğer sayfalar kullanabilsin
+// index.html ve diğer sayfaların kullanabilmesi için tüm fonksiyonlar dışarı aktarılmıştır
 export { 
-    db, collection, addDoc, getDocs, doc, setDoc, 
-    getDoc, updateDoc, query, where, onSnapshot, 
-    deleteDoc, orderBy, limit 
+    db, 
+    collection, 
+    addDoc, 
+    getDocs, 
+    doc, 
+    setDoc, 
+    getDoc, 
+    updateDoc, 
+    query, 
+    where, 
+    onSnapshot, 
+    deleteDoc, 
+    orderBy, 
+    limit, 
+    increment 
 };

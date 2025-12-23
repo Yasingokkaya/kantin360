@@ -2,11 +2,13 @@
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kantin360 | Yönetim Paneli</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     
     <script type="module">
         import { 
-            db, collection, addDoc, onSnapshot, doc, getDoc, query, orderBy, limit 
+            db, collection, addDoc, onSnapshot, doc, getDoc, query, orderBy, limit, where, getDocs, deleteDoc, updateDoc, increment 
         } from './firebase-config.js';
 
         // --- GLOBAL DEĞİŞKENLER ---
@@ -14,7 +16,9 @@
         let schoolId = urlParams.get('id') || localStorage.getItem("loggedSchoolId");
         let products = [];
         let cart = [];
-
+        let myChart = null;
+        let allCustomers = [];
+        let editingProductId = null;
         // --- SİSTEMİ BAŞLAT ---
         async function init() {
             if (!schoolId) { window.location.href = "login.html"; return; }
@@ -26,42 +30,150 @@
                     localStorage.setItem("loggedSchoolId", schoolId);
                     loadData();
                 } else {
-                    alert("Okul Bulunamadı!");
+                    showNotify("Okul Bulunamadı!", "error");
                     logout();
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) { console.error("Başlatma hatası:", e); }
         }
 
         function loadData() {
-            // Ürünler
+            // Ürünleri Canlı Dinle
             onSnapshot(collection(db, "schools", schoolId, "products"), (snap) => {
                 products = [];
                 snap.forEach(d => products.push({id: d.id, ...d.data()}));
                 renderProducts();
                 document.getElementById('loading').style.display = 'none';
             });
-            // Son Satışlar
+            // Son Satışları Dinle
             const salesQuery = query(collection(db, "schools", schoolId, "sales"), orderBy("date", "desc"), limit(10));
+           
             onSnapshot(salesQuery, (snap) => {
-                const recentList = document.getElementById('recentSalesList');
-                recentList.innerHTML = '';
-                snap.forEach(d => {
-                    const data = d.data();
-                    recentList.innerHTML += `<div class="sale-log"><span>${data.note || 'Genel'}</span> <b>${data.total.toFixed(2)}₺</b></div>`;
-                });
+            const recentList = document.getElementById('recentSalesList');
+            recentList.innerHTML = '';
+            snap.forEach(d => {
+                const data = d.data();
+                const isCard = data.type === 'Kart';
+                const icon = isCard ? '💳' : '💵';
+                const iconClass = isCard ? 'icon-card' : 'icon-cash';
+                
+                recentList.innerHTML += `
+                    <div class="sale-log">
+                        <div class="sale-info">
+                            <div class="sale-icon ${iconClass}">${icon}</div>
+                            <div class="sale-details">
+                                <b>${data.note || 'Genel Satış'}</b>
+                                <span>${data.type} İşlemi</span>
+                            </div>
+                        </div>
+                        <div class="sale-amount">
+                            <b>${data.total.toFixed(2)}₺</b>
+                            <button class="btn-void" onclick="openRefundModal('${d.id}')">İade/Sil</button>
+                        </div>
+                    </div>`;
             });
+        });
         }
 
-        // --- FONKSİYONLAR ---
+        // --- ÜRÜN RENDER ---
         window.renderProducts = () => {
+            const searchTerm = document.getElementById('productSearch').value.toLowerCase();
             const grid = document.getElementById('productGrid');
-            grid.innerHTML = products.map(p => `
-                <div class="product-card" onclick="addToCart('${p.id}')">
-                    <h3>${p.name}</h3>
-                    <p>${p.price.toFixed(2)} ₺</p>
-                </div>
-            `).join('');
+            const invList = document.getElementById('inventoryListBody');
+            const filteredProducts = products.filter(p => p.name.toLowerCase().includes(searchTerm));
+            
+            grid.innerHTML = filteredProducts.map((p, index) => {
+                const isCritical = (p.stock || 0) <= (p.critical || 0);
+                let icon = "📦";
+                const n = p.name.toLowerCase();
+                if(n.includes("tost")) icon = "🥪";
+                else if(n.includes("su") || n.includes("ayran") || n.includes("içecek")) icon = "🥤";
+                else if(n.includes("gofret") || n.includes("çikolata") || n.includes("kek")) icon = "🍫";
+
+                const colors = ['#e0f2fe', '#dcfce7', '#f3e8ff', '#ffedd5', '#fce7f3'];
+                const accentColors = ['#0ea5e9', '#22c55e', '#a855f7', '#f97316', '#ec4899'];
+                const colorIdx = index % colors.length;
+
+                return `
+                <div class="product-card" onclick="addToCart('${p.id}')" 
+                     style="background: ${isCritical ? '#fff1f2' : colors[colorIdx]}; ${isCritical ? 'border: 2px solid #ef4444;' : ''}">
+                    <div class="card-accent" style="background: ${isCritical ? '#ef4444' : accentColors[colorIdx]}"></div>
+                    <div class="card-icon">${icon}</div>
+                    <h3 style="margin:0; font-size:0.9rem; font-weight:700; height: 2.4em; overflow: hidden;">${p.name}</h3>
+                    <p style="margin:5px 0; font-size:1.3rem; font-weight:900;">${p.price.toFixed(2)} ₺</p>
+                    <div style="font-size: 0.75rem; background: rgba(255,255,255,0.5); border-radius: 20px; padding: 2px 8px; width: fit-content; margin: 0 auto;">
+                        Stok: <b>${p.stock || 0}</b> ${isCritical ? '⚠️' : ''}
+                    </div>
+                </div>`;
+            }).join('');
+
+            invList.innerHTML = products.map(p => {
+            const cost = p.cost || 0;
+            const profit = p.price - cost;
+            const profitPercent = cost > 0 ? ((profit / cost) * 100).toFixed(0) : 0;
+            const isCritical = (p.stock || 0) <= (p.critical || 0);
+
+            return `
+                <tr>
+                    <td><b style="font-size:1rem;">${p.name}</b></td>
+                    <td><small style="color:gray;">A: ${cost.toFixed(2)}₺</small><br><b>S: ${p.price.toFixed(2)}₺</b></td>
+                    <td><span style="color:#16a34a; font-weight:bold;">+${profit.toFixed(2)}₺</span> <small>(%${profitPercent})</small></td>
+                    <td>
+                        <span class="badge ${isCritical ? 'badge-critical' : 'badge-stock'}">
+                            ${p.stock || 0} Adet ${isCritical ? '⚠️' : ''}
+                        </span>
+                    </td>
+                   <td style="text-align:right;">
+    <div style="display:flex; gap:8px; justify-content: flex-end;">
+        <button class="btn-edit-p" onclick="editProduct('${p.id}')">✏️ Düzenle</button>
+        <button class="btn-del-p" onclick="deleteProduct('${p.id}')">🗑️ Sil</button>
+    </div>
+</td>
+                </tr>
+            `;
+        }).join('');
         };
+
+// ÜRÜN SİLME
+window.deleteProduct = async (id) => {
+    const p = products.find(x => x.id === id);
+    const onay = await askConfirm("Ürünü Sil?", `"${p.name}" kalıcı olarak silinecek.`, 'warning');
+    if(onay) {
+        await deleteDoc(doc(db, "schools", schoolId, "products", id));
+        showNotify("Ürün başarıyla kaldırıldı", "error");
+    }
+};
+
+// SEPETİ BOŞALT
+window.clearCart = async () => {
+    if (cart.length === 0) return;
+    const onay = await askConfirm("Sepeti Boşalt?", "Sepetteki tüm ürünler temizlenecek.", 'warning');
+    if (onay) {
+        cart = [];
+        updateCartUI();
+        showNotify("Sepet temizlendi", "info");
+    }
+};
+window.editProduct = (id) => {
+    const p = products.find(x => x.id === id);
+    if (!p) return;
+
+    editingProductId = id; // Düzenleme moduna geçtik
+    
+    // Formu doldur
+    document.getElementById('newPName').value = p.name;
+    document.getElementById('newPCost').value = p.cost;
+    document.getElementById('newPPrice').value = p.price;
+    document.getElementById('newPStock').value = p.stock;
+    document.getElementById('newPCritical').value = p.critical;
+
+    // Butonu Güncelle moduna çevir
+    const saveBtn = document.querySelector(".inventory-form button");
+    saveBtn.innerText = "Değişiklikleri Kaydet";
+    saveBtn.style.background = "#f59e0b"; // Turuncu renk
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showNotify(`${p.name} düzenleniyor...`, "info");
+};
 
         window.addToCart = (id) => {
             const p = products.find(x => x.id === id);
@@ -70,149 +182,1061 @@
             updateCartUI();
         };
 
-        window.updateQty = (index, delta) => {
-            cart[index].qty += delta;
-            if(cart[index].qty <= 0) cart.splice(index, 1);
-            updateCartUI();
-        };
+       window.updateCartUI = () => {
+    const list = document.getElementById('cartList');
+    const totalEl = document.getElementById('totalAmount');
+    let total = 0;
 
-        function updateCartUI() {
-            const list = document.getElementById('cartList');
-            let total = 0;
-            list.innerHTML = cart.map((item, i) => {
-                total += item.price * item.qty;
-                return `<div class="cart-item"><span>${item.name} (x${item.qty})</span><b>${(item.price * item.qty).toFixed(2)}₺</b></div>`;
-            }).join('');
-            document.getElementById('totalAmount').innerText = total.toFixed(2);
+    if (cart.length === 0) {
+        list.innerHTML = `<div class="empty-cart-msg">Sepetiniz şu an boş.</div>`;
+        totalEl.innerText = "0.00";
+        return;
+    }
+
+    list.innerHTML = cart.map(item => {
+        const itemTotal = item.price * item.qty;
+        total += itemTotal;
+        return `
+            <div class="cart-item">
+                <div class="cart-item-info">
+                    <span class="cart-item-name">${item.name}</span>
+                    <span class="cart-item-price">${itemTotal.toFixed(2)} ₺</span>
+                </div>
+                <div class="cart-controls">
+                    <button class="qty-btn" onclick="changeQty('${item.id}', -1)">-</button>
+                    <span class="cart-qty">${item.qty}</span>
+                    <button class="qty-btn" onclick="changeQty('${item.id}', 1)">+</button>
+                    <span class="btn-remove-item" onclick="removeFromCart('${item.id}')">×</span>
+                </div>
+            </div>`;
+    }).join('');
+    
+    totalEl.innerText = total.toFixed(2);
+};
+
+// Miktar Değiştirme
+window.changeQty = (id, delta) => {
+    const item = cart.find(x => x.id === id);
+    if (!item) return;
+    item.qty += delta;
+    if (item.qty <= 0) {
+        removeFromCart(id);
+    } else {
+        updateCartUI();
+    }
+};
+
+// Tekli Ürün Silme
+window.removeFromCart = (id) => {
+    cart = cart.filter(x => x.id !== id);
+    updateCartUI();
+};
+
+// Tüm Sepeti Temizle
+window.clearCart = () => {
+    if (cart.length > 0 && confirm("Sepeti boşaltmak istediğinize emin misiniz?")) {
+        cart = [];
+        updateCartUI();
+    }
+};
+window.addNewProduct = async () => {
+    const inputs = {
+        name: document.getElementById('newPName'),
+        cost: document.getElementById('newPCost'),
+        price: document.getElementById('newPPrice'),
+        stock: document.getElementById('newPStock'),
+        critical: document.getElementById('newPCritical')
+    };
+
+    const val = {
+        name: inputs.name.value.trim(),
+        cost: parseFloat(inputs.cost.value) || 0,
+        price: parseFloat(inputs.price.value) || 0,
+        stock: parseInt(inputs.stock.value) || 0,
+        critical: parseInt(inputs.critical.value) || 0
+    };
+
+    if(!val.name || val.price <= 0) {
+        showNotify("Lütfen ürün adını ve fiyatını girin!", "error");
+        return;
+    }
+
+    try {
+        if (editingProductId) {
+            // GÜNCELLEME MODU
+            await updateDoc(doc(db, "schools", schoolId, "products", editingProductId), val);
+            showNotify("Ürün başarıyla güncellendi.");
+            editingProductId = null; // Modu sıfırla
+        } else {
+            // YENİ EKLEME MODU
+            await addDoc(collection(db, "schools", schoolId, "products"), { ...val, created_at: new Date() });
+            showNotify("Yeni ürün eklendi.");
         }
+        
+        // Formu ve Butonu Sıfırla
+        Object.values(inputs).forEach(i => i.value = "");
+        const saveBtn = document.querySelector(".inventory-form button");
+        saveBtn.innerText = "Ekle";
+        saveBtn.style.background = "var(--p)";
+        
+    } catch (e) {
+        showNotify("İşlem başarısız!", "error");
+    }
+};
 
         window.processSale = async (type) => {
             if(cart.length === 0) return;
-            const note = type === 'Veresiye' ? prompt("Müşteri Adı:") : "";
+            if (type === 'Veresiye') { openCustomerModal(); return; }
             const total = cart.reduce((s, i) => s + (i.price * i.qty), 0);
-            await addDoc(collection(db, "schools", schoolId, "sales"), { items: cart, total, type, note, date: new Date() });
-            cart = []; updateCartUI(); alert("Satış Başarılı!");
+            const cost = cart.reduce((s, i) => s + ((i.cost || 0) * i.qty), 0);
+            try {
+                await addDoc(collection(db, "schools", schoolId, "sales"), { items: cart, total, cost, profit: total-cost, type, date: new Date() });
+                for (const item of cart) { await updateDoc(doc(db, "schools", schoolId, "products", item.id), { stock: increment(-item.qty) }); }
+                cart = []; updateCartUI(); showNotify("Satış Tamamlandı!");
+            } catch (e) { showNotify("Hata!", "error"); }
         };
 
-        window.addNewProduct = async () => {
-            const name = document.getElementById('newPName').value;
-            const price = parseFloat(document.getElementById('newPPrice').value);
-            if(name && price) {
-                await addDoc(collection(db, "schools", schoolId, "products"), { name, price });
-                document.getElementById('newPName').value = ''; document.getElementById('newPPrice').value = '';
+        window.loadProfitReport = async () => {
+            const start = new Date(); start.setHours(0,0,0,0);
+            const snap = await getDocs(collection(db, "schools", schoolId, "sales"));
+            let cash = 0, card = 0, debt = 0, cost = 0, profit = 0;
+            snap.forEach(d => {
+                const v = d.data();
+                const sD = v.date.toDate();
+                const pD = v.paidDate ? v.paidDate.toDate() : null;
+                if (sD >= start) {
+                    if (v.type === "Nakit") cash += v.total;
+                    if (v.type === "Kart") card += v.total;
+                    if (v.type === "Veresiye") debt += v.total;
+                    cost += (v.cost || 0); profit += (v.profit || 0);
+                }
+                if (pD && pD >= start) {
+                    if (v.type.includes("Nakit")) cash += v.total;
+                    if (v.type.includes("Kart")) card += v.total;
+                }
+            });
+            document.getElementById('repCash').innerText = cash.toFixed(2) + "₺";
+            document.getElementById('repCard').innerText = card.toFixed(2) + "₺";
+            document.getElementById('repDebt').innerText = debt.toFixed(2) + "₺";
+            document.getElementById('repTotalCost').innerText = cost.toFixed(2) + "₺";
+            document.getElementById('repNetProfit').innerText = profit.toFixed(2) + "₺";
+        };
+window.loadDebts = async () => {
+            const q = query(collection(db, "schools", schoolId, "sales"), where("type", "==", "Veresiye"));
+            const snap = await getDocs(q);
+            const body = document.getElementById('debtListBody');
+            body.innerHTML = '';
+            let map = {};
+
+            snap.forEach(d => {
+                const data = d.data();
+                const n = data.note || "İsimsiz";
+                if(!map[n]) map[n] = { t: 0, ids: [] };
+                map[n].t += data.total; map[n].ids.push(d.id);
+            });
+
+            if(Object.keys(map).length === 0) {
+                body.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px;">Borç kaydı yok.</td></tr>';
+                return;
             }
+
+            Object.entries(map).forEach(([name, info]) => {
+                // Tırnak işaretlerini kaçırarak (escape) hataları önlüyoruz
+                const escapedName = name.replace(/'/g, "\\'");
+                const safeIds = JSON.stringify(info.ids).replace(/"/g, '&quot;');
+                
+                body.innerHTML += `
+                <tr>
+                    <td>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <div style="width:35px; height:35px; background:#e2e8f0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:1.2rem;">👤</div>
+                            <b style="font-size:1rem;">${name}</b>
+                        </div>
+                    </td>
+                    <td>
+                        <span style="background:#fff1f2; color:#be123c; padding:5px 12px; border-radius:20px; font-weight:800; font-size:1.1rem;">
+                            ${info.t.toFixed(2)} ₺
+                        </span>
+                    </td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="btn-action btn-det" onclick="showDebtHistory('${escapedName}')"><span>📂</span> Detay</button>
+                            <button class="btn-action btn-ed" onclick="editCustomerName('${escapedName}')"><span>✏️</span> Düzenle</button>
+                            <button class="btn-action btn-del" onclick="deleteCustomerDebts('${escapedName}')"><span>🗑️</span> Sil</button>
+                            <button class="btn-action btn-col" onclick="payDebt('${escapedName}', ${safeIds})"><span>💰</span> Tahsil Et</button>
+                        </div>
+                    </td>
+                </tr>`;
+            });
+        };
+        // --- CARİ DETAY GÖSTERME ---
+        window.showDebtHistory = async (name) => {
+            const q = query(collection(db, "schools", schoolId, "sales"), where("note", "==", name), where("type", "==", "Veresiye"));
+            const snap = await getDocs(q);
+            const content = document.getElementById('historyContent');
+            document.getElementById('historyTitle').innerText = `👤 ${name} - Cari Hareketler`;
+            
+            let html = `
+                <table class="history-table">
+                    <thead style="background:#f1f5f9;">
+                        <tr>
+                            <th style="padding:10px; text-align:left;">📅 Tarih</th>
+                            <th style="padding:10px; text-align:left;">🛒 Alınanlar</th>
+                            <th style="padding:10px; text-align:right;">💰 Tutar</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+            
+            snap.forEach(d => {
+                const data = d.data();
+                const date = data.date.toDate().toLocaleDateString('tr-TR', { 
+                    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' 
+                });
+                const items = data.items.map(i => `
+                    <span style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:0.8rem; margin-right:4px; border:1px solid #e2e8f0;">
+                        ${i.name} x${i.qty}
+                    </span>`).join('');
+                
+                html += `
+                    <tr>
+                        <td style="color:#64748b; font-size:0.8rem;">${date}</td>
+                        <td>${items}</td>
+                        <td style="text-align:right; font-weight:700; color:#1e293b;">${data.total.toFixed(2)} ₺</td>
+                    </tr>`;
+            });
+            
+            html += '</tbody></table>';
+            content.innerHTML = html;
+            document.getElementById('historyModal').style.display = 'flex';
         };
 
-        window.switchTab = (tab) => {
+        window.closeHistoryModal = () => document.getElementById('historyModal').style.display = 'none';
+
+        
+// --- İSİM DÜZENLEME (İSİMSİZ KAYITLARI DA KAPSAR) ---
+        window.editCustomerName = async (oldName) => {
+            const newName = prompt("Yeni müşteri adını giriniz:", oldName === "İsimsiz" ? "" : oldName);
+            if (!newName || newName === oldName) return;
+
+            try {
+                // Tüm veresiye kayıtlarını çekip program içinde eşleştiriyoruz
+                const q = query(collection(db, "schools", schoolId, "sales"), where("type", "==", "Veresiye"));
+                const snap = await getDocs(q);
+                
+                let count = 0;
+                for (let d of snap.docs) {
+                    const data = d.data();
+                    const currentName = data.note || "İsimsiz"; // Boş olanları "İsimsiz" kabul et
+                    
+                    if (currentName === oldName) {
+                        await updateDoc(doc(db, "schools", schoolId, "sales", d.id), { note: newName });
+                        count++;
+                    }
+                }
+
+                if (count > 0) {
+                    showNotify(`${count} adet kayıt "${newName}" olarak güncellendi.`);
+                    loadDebts();
+                } else {
+                    showNotify("Güncellenecek kayıt bulunamadı!", "error");
+                }
+            } catch (e) { showNotify("Hata: " + e.message, "error"); }
+        };
+
+        // --- MÜŞTERİ MODALI YÖNETİMİ ---
+        window.openCustomerModal = async () => {
+            const modal = document.getElementById('customerModal');
+            modal.style.display = 'flex';
+            document.getElementById('custSearchInput').value = '';
+            
+            // Müşteri listesini tazeleyerek çek
+            const snap = await getDocs(collection(db, "schools", schoolId, "customers"));
+            allCustomers = [];
+            snap.forEach(d => allCustomers.push({id: d.id, name: d.data().name}));
+            searchCustomers();
+        };
+
+        window.searchCustomers = () => {
+            const term = document.getElementById('custSearchInput').value.toLowerCase();
+            const listArea = document.getElementById('custListArea');
+            const filtered = allCustomers.filter(c => c.name.toLowerCase().includes(term));
+            
+            if (filtered.length === 0) {
+                listArea.innerHTML = '<div style="padding:20px; text-align:center; color:#94a3b8;">Müşteri bulunamadı. "Yeni Ekle" diyebilirsiniz.</div>';
+                return;
+            }
+
+            listArea.innerHTML = filtered.map(c => `
+                <div class="customer-item" onclick="finalizeVeresiyeSale('${c.name}')">
+                    <b>${c.name}</b>
+                    <span>Seç ➔</span>
+                </div>
+            `).join('');
+        };
+
+        // --- HEM BORCU HEM DE MÜŞTERİ KARTINI SİLER ---
+        window.deleteCustomerDebts = async (name) => {
+            if (!confirm(`${name} kişisine ait tüm borçlar ve müşteri kaydı tamamen silinecek! Emin misiniz?`)) return;
+
+            try {
+                // 1. Veresiye Kayıtlarını Sil
+                const qSales = query(collection(db, "schools", schoolId, "sales"), where("type", "==", "Veresiye"));
+                const snapSales = await getDocs(qSales);
+                for (let d of snapSales.docs) {
+                    if ((d.data().note || "İsimsiz") === name) await deleteDoc(doc(db, "schools", schoolId, "sales", d.id));
+                }
+
+                // 2. Müşteri Kartını Sil (Modalda görünmemesi için)
+                const qCust = query(collection(db, "schools", schoolId, "customers"), where("name", "==", name));
+                const snapCust = await getDocs(qCust);
+                for (let d of snapCust.docs) { await deleteDoc(doc(db, "schools", schoolId, "customers", d.id)); }
+
+                showNotify(`${name} sistemden tamamen kaldırıldı.`);
+                loadDebts(); 
+            } catch (e) { showNotify("Hata oluştu!", "error"); }
+        };
+
+        // --- MÜŞTERİ LİSTESİNİ GÜNCELLEYEREK AÇAR ---
+        window.openCustomerModal = async () => {
+            document.getElementById('customerModal').style.display = 'flex';
+            document.getElementById('custSearchInput').value = '';
+            
+            // Güncel listeyi çek
+            const snap = await getDocs(collection(db, "schools", schoolId, "customers"));
+            allCustomers = [];
+            snap.forEach(d => allCustomers.push(d.data().name));
+            searchCustomers();
+        };
+
+        window.searchCustomers = () => {
+            const term = document.getElementById('custSearchInput').value.toLowerCase();
+            const listArea = document.getElementById('custListArea');
+            const filtered = allCustomers.filter(c => c.toLowerCase().includes(term));
+            
+            if (filtered.length === 0) {
+                listArea.innerHTML = '<div style="padding:20px; text-align:center; color:#94a3b8; font-size:0.9rem;">Müşteri bulunamadı.</div>';
+                return;
+            }
+
+            listArea.innerHTML = filtered.map(c => `
+                <div class="customer-item" onclick="finalizeVeresiyeSale('${c}')">
+                    <b>${c}</b>
+                    <span>Seç ➔</span>
+                </div>
+            `).join('');
+        };
+
+       window.payDebt = async (name, ids) => {
+            const input = prompt(`${name} ödemesi nasıl yapıldı?\nNakit: N / Kart: K`);
+            // Eğer kullanıcı "İptal" derse işlemi durdururuz
+            if (!input) return showNotify("İşlem İptal Edildi", "info");
+            
+            const method = input.toUpperCase();
+            if (method !== 'N' && method !== 'K') return showNotify("Geçersiz giriş!", "error");
+            
+            const type = method === 'N' ? "Veresiye (Tahsilat: Nakit)" : "Veresiye (Tahsilat: Kart)";
+            try {
+                for(let id of ids) { 
+                    await updateDoc(doc(db, "schools", schoolId, "sales", id), { type: type, paidDate: new Date() });
+                }
+                showNotify("Tahsilat Başarılı"); loadDebts(); loadProfitReport();
+            } catch (e) { showNotify("Hata!", "error"); }
+        };
+
+        window.loadAnalysis = async () => {
+            const snap = await getDocs(collection(db, "schools", schoolId, "sales"));
+            let stats = {};
+            snap.forEach(d => { (d.data().items || []).forEach(i => { stats[i.name] = (stats[i.name] || 0) + i.qty; }); });
+            const sorted = Object.entries(stats).sort((a,b) => b[1]-a[1]).slice(0,5);
+            const labels = sorted.map(x => x[0]), counts = sorted.map(x => x[1]);
+            const ctx = document.getElementById('topProductsChart').getContext('2d');
+            if(myChart) myChart.destroy();
+            myChart = new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Adet', data: counts, backgroundColor: '#0ea5e9' }] }, options: { responsive: true, maintainAspectRatio: false } });
+        };
+
+       window.switchTab = (tab, element) => {
+            // Tüm içerikleri ve linkleri temizle
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+            
+            // Aktif olanı işaretle
             document.getElementById(tab).classList.add('active');
-            event.currentTarget.classList.add('active');
+            if(element) element.classList.add('active');
+
+            // Modül özelinde veri yükle
+            if(tab === 'reports') loadProfitReport();
+            if(tab === 'debts') loadDebts();
+            if(tab === 'analysis') loadAnalysis();
         };
 
         window.logout = () => { localStorage.removeItem("loggedSchoolId"); window.location.href = "login.html"; };
 
+        
+
+        window.closeCustomerModal = () => document.getElementById('customerModal').style.display = 'none';
+
+       
+
+        window.addNewCustomerAndSale = async () => {
+            const newName = document.getElementById('custSearchInput').value.trim();
+            if (!newName) return showNotify("İsim yazın!", "info");
+            await addDoc(collection(db, "schools", schoolId, "customers"), { name: newName });
+            finalizeVeresiyeSale(newName);
+        };
+
+        window.finalizeVeresiyeSale = async (customerName) => {
+            const total = cart.reduce((s, i) => s + (i.price * i.qty), 0);
+            const cost = cart.reduce((s, i) => s + ((i.cost || 0) * i.qty), 0);
+            try {
+                await addDoc(collection(db, "schools", schoolId, "sales"), { items: cart, total, cost, profit: total-cost, type: "Veresiye", note: customerName, date: new Date() });
+                for (const item of cart) { await updateDoc(doc(db, "schools", schoolId, "products", item.id), { stock: increment(-item.qty) }); }
+                cart = []; updateCartUI(); closeCustomerModal(); showNotify("Veresiye Kaydedildi");
+            } catch (e) { showNotify("Hata!", "error"); }
+        };
+
+    window.showNotify = (msg, type = 'success') => {
+            const container = document.getElementById('toastContainer');
+            if(!container) return; 
+            
+            const toast = document.createElement('div');
+            // Türlere göre ikon belirleme
+            let icon = "✅";
+            if(type === 'error') icon = "❌";
+            if(type === 'info') icon = "ℹ️";
+
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `<span class="toast-icon">${icon}</span> <span>${msg}</span>`;
+            
+            container.appendChild(toast);
+            
+            // Animasyonla içeri kaydır
+            setTimeout(() => toast.classList.add('show'), 10);
+            
+            // 3.5 saniye sonra kaldır
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 3500);
+        };
+let activeRefundSaleId = null;
+
+        // 1. İADE PENCERESİNİ AÇ (SATIŞ İÇERİĞİNİ GÖSTER)
+        window.openRefundModal = async (saleId) => {
+            activeRefundSaleId = saleId;
+            const snap = await getDoc(doc(db, "schools", schoolId, "sales", saleId));
+            if (!snap.exists()) return;
+            
+            const data = snap.data();
+            const list = document.getElementById('refundItemsList');
+            list.innerHTML = '';
+
+            data.items.forEach((item, index) => {
+                list.innerHTML += `
+                    <div class="refund-item-row">
+                        <div>
+                            <b>${item.name}</b><br>
+                            <small>${item.qty} Adet x ${item.price.toFixed(2)}₺</small>
+                        </div>
+                        <button class="btn-void" style="opacity:1;" onclick="refundSingleItem(${index})">Ürünü İade Al</button>
+                    </div>`;
+            });
+            document.getElementById('refundModal').style.display = 'flex';
+        };
+
+        window.closeRefundModal = () => document.getElementById('refundModal').style.display = 'none';
+
+        // 2. TEK BİR ÜRÜNÜ İADE ET
+        window.refundSingleItem = async (itemIndex) => {
+            if(!confirm("Bu ürünü iade alıp stoğa geri eklemek istediğinize emin misiniz?")) return;
+            
+            try {
+                const saleRef = doc(db, "schools", schoolId, "sales", activeRefundSaleId);
+                const saleSnap = await getDoc(saleRef);
+                let saleData = saleSnap.data();
+                const item = saleData.items[itemIndex];
+
+                // Stok Geri Yükle
+                await updateDoc(doc(db, "schools", schoolId, "products", item.id), { stock: increment(item.qty) });
+
+                // Satış Verisini Güncelle
+                saleData.total -= (item.price * item.qty);
+                saleData.cost -= ((item.cost || 0) * item.qty);
+                saleData.profit = saleData.total - saleData.cost;
+                saleData.items.splice(itemIndex, 1);
+
+                if (saleData.items.length === 0) {
+                    await deleteDoc(saleRef);
+                    showNotify("Tüm ürünler iade edildiği için satış kaydı silindi.");
+                } else {
+                    await updateDoc(saleRef, saleData);
+                    showNotify(`${item.name} iade alındı, kasa ve stok güncellendi.`);
+                }
+                
+                closeRefundModal();
+                loadProfitReport();
+            } catch (e) { showNotify("Hata: " + e.message, "error"); }
+        };
+
+        // 3. TÜM SATIŞI İPTAL ET
+        window.voidFullSale = async () => {
+            if(!confirm("Tüm satışı iptal edip tüm ürünleri stoğa geri yüklemek istiyor musunuz?")) return;
+            try {
+                const saleRef = doc(db, "schools", schoolId, "sales", activeRefundSaleId);
+                const saleSnap = await getDoc(saleRef);
+                const items = saleSnap.data().items;
+                
+                for (const i of items) {
+                    await updateDoc(doc(db, "schools", schoolId, "products", i.id), { stock: increment(i.qty) });
+                }
+                await deleteDoc(saleRef);
+                showNotify("Tüm satış iptal edildi.");
+                closeRefundModal();
+                loadProfitReport();
+            } catch (e) { showNotify("Hata!", "error"); }
+        };
+     // Promise tabanlı modern onay penceresi
+window.askConfirm = (title, message, type = 'warning') => {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('customConfirmModal');
+        const titleEl = document.getElementById('confirmTitle');
+        const msgEl = document.getElementById('confirmMessage');
+        const okBtn = document.getElementById('confirmOkBtn');
+        const cancelBtn = document.getElementById('confirmCancelBtn');
+        const iconEl = document.getElementById('confirmIcon');
+
+        titleEl.innerText = title;
+        msgEl.innerText = message;
+        iconEl.innerText = type === 'warning' ? '⚠️' : '🗑️';
+        okBtn.style.background = type === 'warning' ? '#ef4444' : '#3b82f6';
+        
+        modal.style.display = 'flex';
+
+        okBtn.onclick = () => { modal.style.display = 'none'; resolve(true); };
+        cancelBtn.onclick = () => { modal.style.display = 'none'; resolve(false); };
+    });
+};
         init();
     </script>
 
     <style>
-        :root { --primary: #0284c7; --bg: #f8fafc; --dark: #0f172a; }
-        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: var(--bg); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+/* İADE DETAY MODALI VE YENİ TOAST */
+        .refund-item-row { 
+            display: flex; justify-content: space-between; align-items: center; 
+            padding: 12px; border-bottom: 1px solid #f1f5f9; 
+        }
+        .refund-item-row:last-child { border-bottom: none; }
         
-        /* ÜST MENÜ (HEADER) */
-        .navbar { background: var(--dark); color: white; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; height: 70px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .logo { font-weight: 800; font-size: 1.4rem; color: var(--primary); }
-        .school-name { font-weight: 400; font-size: 1.1rem; color: #fff; margin-left: 15px; }
+        .toast { 
+            min-width: 300px; padding: 16px 20px; border-radius: 12px;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+            display: flex; align-items: center; gap: 12px;
+            font-weight: 600; border: none; border-left: 6px solid #ddd;
+            transform: translateX(120%); transition: 0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+        }
+        .toast.success { border-left-color: #10b981; background: #ecfdf5; color: #065f46; }
+        .toast.error { border-left-color: #ef4444; background: #fef2f2; color: #991b1b; }
+        .toast.info { border-left-color: #3b82f6; background: #eff6ff; color: #1e40af; }
+        /* YENİ NESİL NAVBAR TASARIMI */
+        .navbar { 
+    background: linear-gradient(135deg, #334155 0%, #475569 100%); 
+    height: 80px; display: flex; align-items: center; justify-content: space-between; 
+    padding: 0 30px; z-index: 1000; 
+    box-shadow: 0 8px 32px rgba(51, 65, 85, 0.2);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+        .logo-container { display: flex; align-items: center; gap: 15px; }
+        .logo { 
+            background: linear-gradient(45deg, #0ea5e9, #22c55e);
+            /* Standart özellik eklendi: */
+            background-clip: text; 
+            -webkit-background-clip: text; 
+            -webkit-text-fill-color: transparent;
+            font-size: 1.6rem; font-weight: 900; letter-spacing: -1px;
+        }
+        .school-name { 
+            color: #94a3b8; font-size: 0.9rem; font-weight: 500;
+            padding-left: 15px; border-left: 1px solid rgba(255,255,255,0.1); 
+        }
+        .nav-links { display: flex; gap: 8px; align-items: center; }
+        .nav-link { 
+            display: flex; align-items: center; gap: 8px;
+            color: #94a3b8 !important; padding: 10px 16px; text-decoration: none; 
+            font-weight: 600; font-size: 0.9rem; cursor: pointer;
+            border-radius: 12px; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .nav-link i { font-size: 1.1rem; }
+        .nav-link:hover { background: rgba(255,255,255,0.05); color: white !important; }
 
-        /* MODÜL BUTONLARI */
-        .nav-links { display: flex; gap: 5px; height: 100%; align-items: center; }
-        .nav-link { padding: 0 20px; height: 70px; line-height: 70px; color: #94a3b8; cursor: pointer; transition: 0.3s; font-weight: 500; border-bottom: 4px solid transparent; }
-        .nav-link:hover { color: white; background: #1e293b; }
-        .nav-link.active { color: white; border-bottom-color: var(--primary); background: #1e293b; }
+        /* MODÜL RENK PALETİ (Active States) */
+        .nav-link[onclick*="pos"].active { background: #0ea5e9 !important; color: white !important; box-shadow: 0 4px 15px rgba(14, 165, 233, 0.4); }
+        .nav-link[onclick*="inventory"].active { background: #f59e0b !important; color: white !important; box-shadow: 0 4px 15px rgba(245, 158, 11, 0.4); }
+        .nav-link[onclick*="reports"].active { background: #8b5cf6 !important; color: white !important; box-shadow: 0 4px 15px rgba(139, 92, 246, 0.4); }
+        .nav-link[onclick*="debts"].active { background: #ef4444 !important; color: white !important; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.4); }
+        .nav-link[onclick*="analysis"].active { background: #10b981 !important; color: white !important; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4); }
 
-        /* ANA İÇERİK */
-        .main-container { flex: 1; overflow: hidden; padding: 20px; }
-        .tab-content { display: none; height: 100%; }
+
+/* RENKLİ VE DİNAMİK RAPOR KARTLARI */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .stat-item { 
+            background: white; padding: 20px; border-radius: 15px; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: 0.3s;
+            display: flex; flex-direction: column; gap: 5px; border-left: 6px solid #ddd;
+        }
+        .stat-item:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
+        
+        /* Kart Renkleri */
+        .stat-cash { border-left-color: #0ea5e9; background: #f0f9ff; } /* Mavi - Nakit */
+        .stat-card { border-left-color: #8b5cf6; background: #f5f3ff; } /* Mor - Kart */
+        .stat-debt { border-left-color: #f59e0b; background: #fffbeb; } /* Turuncu - Borç */
+        .stat-cost { border-left-color: #64748b; background: #f8fafc; } /* Gri - Maliyet */
+        .stat-profit { border-left-color: #10b981; background: #ecfdf5; } /* Yeşil - Kâr */
+
+        .stat-item small { color: #64748b; font-weight: 700; font-size: 0.75rem; text-transform: uppercase; }
+        .stat-item h3 { margin: 0; font-size: 1.5rem; font-weight: 800; color: #1e293b; }
+
+        /* İŞLEM LİSTESİ DİNAMİK TASARIM */
+        #recentSalesList { display: flex; flex-direction: column; gap: 10px; }
+        .sale-log { 
+            display: flex; justify-content: space-between; align-items: center; 
+            padding: 12px 18px; background: white; border-radius: 12px;
+            border: 1px solid #f1f5f9; transition: 0.2s;
+        }
+        .sale-log:hover { border-color: #0ea5e9; background: #f8fafc; }
+        
+        .sale-info { display: flex; align-items: center; gap: 12px; }
+        .sale-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }
+        .icon-cash { background: #e0f2fe; color: #0ea5e9; }
+        .icon-card { background: #f3e8ff; color: #8b5cf6; }
+        
+        .sale-details b { display: block; font-size: 0.95rem; color: #1e293b; }
+        .sale-details span { font-size: 0.75rem; color: #64748b; }
+
+        .sale-amount { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+        .sale-amount b { font-size: 1.1rem; color: #1e293b; }
+    /* VERESİYE BUTON STİLLERİ */
+        .action-btns { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+        .btn-action { 
+            display: flex; align-items: center; gap: 5px;
+            padding: 6px 12px; border-radius: 8px; border: none; 
+            cursor: pointer; font-size: 0.8rem; font-weight: 700; 
+            transition: all 0.2s ease; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .btn-action:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .btn-ed { background: #fefce8; color: #a16207; border: 1px solid #fef08a; } /* Sarı - Düzenle */
+        .btn-del { background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; } /* Kırmızı - Sil */
+        :root { --p: #0ea5e9; --d: #0f172a; --bg: #f8fafc; --txt: #1e293b; }
+        body { font-family: sans-serif; margin: 0; background: var(--bg); color: var(--txt); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        .main-container { flex: 1; padding: 20px; overflow-y: auto; }
+        .tab-content { display: none; }
         .tab-content.active { display: block; }
+        .pos-grid { display: grid; grid-template-columns: 1fr 380px; gap: 20px; }
+        .products-area { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; align-content: start; }
+        .product-card { background: white; padding: 15px; border-radius: 16px; text-align: center; cursor: pointer; height: 180px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card-accent { position: absolute; top: 0; left: 0; right: 0; height: 5px; }
+        .card-icon { font-size: 2rem; }
+        .cart-area { background: white; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; }
+        .cart-list { flex: 1; margin: 15px 0; border-top: 1px solid #eee; }
+        .cart-item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+        .btn-pay { width: 100%; padding: 12px; border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; margin-bottom: 8px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        
+        .card { background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 10px; background: #f8fafc; color: #64748b; }
+        td { padding: 10px; border-bottom: 1px solid #eee; }
+        #loading { position: fixed; inset: 0; background: var(--d); color: white; display: flex; justify-content: center; align-items: center; z-index: 1000; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; justify-content: center; align-items: center; z-index: 2000; }
+        .modal-content { background: white; width: 400px; border-radius: 16px; padding: 20px; }
+        
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
+        /* DİNAMİK MÜŞTERİ MODALI VE LİSTE STİLLERİ */
+        .customer-modal-content {
+            background: white; width: 450px; border-radius: 20px; padding: 25px;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+        }
+        .cust-search-box {
+            width: 100%; padding: 12px 15px; border-radius: 12px;
+            border: 2px solid #e2e8f0; margin-bottom: 15px; font-size: 1rem;
+            transition: 0.2s; box-sizing: border-box;
+        }
+        .cust-search-box:focus { border-color: #0ea5e9; outline: none; box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1); }
+        
+        .customer-list {
+            max-height: 250px; overflow-y: auto; margin-bottom: 20px;
+            border: 1px solid #f1f5f9; border-radius: 12px;
+        }
+        .customer-item {
+            padding: 12px 15px; border-bottom: 1px solid #f1f5f9;
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; transition: 0.2s;
+        }
+        .customer-item:hover { background: #f0f9ff; }
+        .customer-item:last-child { border-bottom: none; }
+        .customer-item b { color: #1e293b; font-size: 0.95rem; }
+        .customer-item span { color: #0ea5e9; font-weight: 700; font-size: 0.85rem; }
 
-        /* POS DÜZENİ */
-        .pos-grid { display: grid; grid-template-columns: 1fr 380px; gap: 20px; height: 100%; }
-        .products-area { overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 15px; align-content: start; padding-right: 10px; }
-        .cart-area { background: white; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; flex-direction: column; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        /* YENİ NESİL TOAST BİLDİRİM STİLLERİ */
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 10000; }
+        .toast { 
+            min-width: 320px; padding: 16px 20px; border-radius: 12px;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+            display: flex; align-items: center; gap: 12px;
+            font-weight: 600; border: none; border-left: 6px solid #ddd;
+            transform: translateX(120%); transition: 0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+            background: white; margin-bottom: 10px;
+        }
+        .toast.show { transform: translateX(0); }
+        .toast.success { border-left-color: #10b981; background: #ecfdf5; color: #065f46; }
+        .toast.error { border-left-color: #ef4444; background: #fef2f2; color: #991b1b; }
+        .toast.info { border-left-color: #3b82f6; background: #eff6ff; color: #1e40af; }
+        .toast-icon { font-size: 1.2rem; }
 
-        /* KARTLAR */
-        .product-card { background: white; padding: 20px; border-radius: 10px; border: 1px solid #e2e8f0; text-align: center; cursor: pointer; transition: 0.15s; }
-        .product-card:hover { border-color: var(--primary); transform: translateY(-2px); }
-        .product-card h3 { margin: 0; font-size: 1rem; color: #334155; }
-        .product-card p { color: var(--primary); font-weight: bold; margin-top: 5px; }
+        /* ÜRÜN YÖNETİMİ ÖZEL STİLLERİ */
+        .inventory-form {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto;
+            gap: 10px;
+            align-items: end;
+        }
+        .inventory-form div { display: flex; flex-direction: column; gap: 5px; }
+        .inventory-form label { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
+        .inventory-form input { margin-bottom: 0; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; }
+        
+        .manage-table th { background: #f1f5f9; color: var(--d); font-weight: 700; }
+        .manage-table td { vertical-align: middle; }
+        .badge { padding: 4px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; }
+        .badge-stock { background: #e0f2fe; color: #0369a1; }
+        .badge-critical { background: #fee2e2; color: #991b1b; }
+/* ÜRÜN TANIMLAMA DİNAMİK STİLLERİ */
+        .inventory-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .inventory-form { 
+            display: grid; 
+            grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto; 
+            gap: 12px; 
+            background: #f8fafc; 
+            padding: 20px; 
+            border-radius: 12px; 
+            border: 1px solid #e2e8f0;
+            align-items: end;
+        }
+        .inventory-form div { display: flex; flex-direction: column; gap: 6px; }
+        .inventory-form label { font-size: 0.75rem; font-weight: 700; color: #64748b; text-transform: uppercase; }
+        .inventory-form input { 
+            padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; 
+            font-size: 0.9rem; transition: 0.2s;
+        }
+        .inventory-form input:focus { border-color: var(--p); outline: none; box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1); }
+        
+        .manage-table { width: 100%; border-collapse: separate; border-spacing: 0 8px; }
+        .manage-table th { padding: 12px; text-align: left; color: #64748b; font-size: 0.8rem; }
+        .manage-table tr { background: white; transition: 0.2s; }
+        .manage-table td { padding: 15px; border-top: 1px solid #f1f5f9; border-bottom: 1px solid #f1f5f9; }
+        .manage-table td:first-child { border-left: 1px solid #f1f5f9; border-radius: 10px 0 0 10px; }
+        .manage-table td:last-child { border-right: 1px solid #f1f5f9; border-radius: 0 10px 10px 0; }
+        .manage-table tr:hover { transform: scale(1.01); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+    /* DİNAMİK MÜŞTERİ MODALI STİLLERİ */
+        .customer-modal-content {
+            background: white; width: 450px; border-radius: 20px; padding: 25px;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+        }
+        .cust-search-box {
+            width: 100%; padding: 12px 15px; border-radius: 12px;
+            border: 2px solid #e2e8f0; margin-bottom: 15px; font-size: 1rem;
+            transition: 0.2s; box-sizing: border-box;
+        }
+        .cust-search-box:focus { border-color: #0ea5e9; outline: none; }
+        
+        .customer-list {
+            max-height: 300px; overflow-y: auto; margin-bottom: 20px;
+            border: 1px solid #f1f5f9; border-radius: 12px;
+        }
+        .customer-item {
+            padding: 12px 15px; border-bottom: 1px solid #f1f5f9;
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; transition: 0.2s;
+        }
+        .customer-item:hover { background: #f0f9ff; }
+        .customer-item:last-child { border-bottom: none; }
+        .customer-item b { color: #1e293b; }
+        .customer-item span { font-size: 0.8rem; color: #0ea5e9; font-weight: 700; }
+    
+    /* Ürün Listesi Butonları Genel */
+.btn-edit-p, .btn-del-p {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 8px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    color: white;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
 
-        /* SEPET DETAY */
-        .cart-list { flex: 1; overflow-y: auto; margin: 15px 0; border-top: 1px solid #f1f5f9; }
-        .cart-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f8fafc; font-size: 0.9rem; }
-        .btn-pay { padding: 14px; border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; margin-bottom: 8px; transition: 0.2s; }
-        .btn-pay:active { transform: scale(0.98); }
+/* Düzenle - Modern Mavi */
+.btn-edit-p {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7);
+}
 
-        /* FORM VE DİĞER */
-        .card { background: white; padding: 25px; border-radius: 12px; border: 1px solid #e2e8f0; max-width: 600px; }
-        input { padding: 12px; margin-bottom: 12px; width: 100%; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
-        .sale-log { display: flex; justify-content: space-between; padding: 12px; background: #f8fafc; border-radius: 8px; margin-bottom: 8px; }
+.btn-edit-p:hover {
+    transform: translateY(-2px) scale(1.05);
+    box-shadow: 0 4px 12px rgba(14, 165, 233, 0.4);
+}
 
-        #loading { position: fixed; inset: 0; background: white; z-index: 1000; display: flex; justify-content: center; align-items: center; }
+/* Sil - Canlı Kırmızı */
+.btn-del-p {
+    background: linear-gradient(135deg, #ef4444, #dc2626) !important; /* Mevcut stili ezmesi için */
+}
+
+.btn-del-p:hover {
+    transform: translateY(-2px) scale(1.05);
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+}
+
+/* Tıklama Efekti */
+.btn-edit-p:active, .btn-del-p:active {
+    transform: scale(0.95);
+}
+/* Bildirimlerin daha belirgin olması için ek gölge */
+.toast.info { border-left-color: #0ea5e9; background: #f0f9ff; color: #0369a1; }
+.toast.error { border-left-color: #ef4444; background: #fef2f2; color: #991b1b; }
+/* Sepet Başlık ve Temizle Butonu */
+.cart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+.btn-clear-cart {
+    background: none;
+    border: 1px solid #fecdd3;
+    color: #e11d48;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: 0.2s;
+}
+.btn-clear-cart:hover { background: #fff1f2; }
+
+/* Sepet Öğe Tasarımı */
+.cart-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.cart-item-info { display: flex; flex-direction: column; gap: 2px; }
+.cart-item-name { font-weight: 600; font-size: 0.9rem; color: #1e293b; }
+.cart-item-price { font-size: 0.8rem; color: #64748b; }
+
+/* Miktar Kontrolleri */
+.cart-controls { display: flex; align-items: center; gap: 8px; }
+.qty-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-weight: bold;
+    transition: 0.2s;
+}
+.qty-btn:hover { background: #f8fafc; border-color: #cbd5e1; }
+.cart-qty { font-weight: 700; font-size: 0.9rem; min-width: 20px; text-align: center; }
+.btn-remove-item { color: #94a3b8; cursor: pointer; margin-left: 5px; font-size: 1rem; }
+.btn-remove-item:hover { color: #ef4444; }
+
+/* Boş Sepet Mesajı */
+.empty-cart-msg {
+    text-align: center;
+    padding: 40px 20px;
+    color: #94a3b8;
+    font-size: 0.9rem;
+}
+
+/* Yeni Nesil Bildirim (Toast) */
+.toast { 
+    min-width: 280px; padding: 12px 20px; border-radius: 12px;
+    background: white; color: #1e293b; font-weight: 600;
+    box-shadow: 0 15px 30px -5px rgba(0,0,0,0.15);
+    display: flex; align-items: center; gap: 12px;
+    transform: translateY(-20px); opacity: 0;
+    transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    border: 1px solid #f1f5f9; margin-bottom: 10px;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.success { border-bottom: 4px solid #10b981; }
+.toast.error { border-bottom: 4px solid #ef4444; }
+.toast.info { border-bottom: 4px solid #3b82f6; }
+
+/* Onay Modali İkon Animasyonu */
+#confirmIcon {
+    animation: pulseWarning 1.5s infinite;
+}
+@keyframes pulseWarning {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+}
     </style>
 </head>
 <body>
-
-    <div id="loading"><h1>Kantin360 Yükleniyor...</h1></div>
-
-    <nav class="navbar">
-        <div style="display: flex; align-items: center;">
+    <div id="loading"><h1>KANTİN360...</h1></div>
+   <nav class="navbar">
+        <div class="logo-container">
             <div class="logo">KANTİN360</div>
             <div class="school-name" id="displaySchoolName">Okul Yükleniyor...</div>
         </div>
-
         <div class="nav-links">
-            <div class="nav-link active" onclick="switchTab('pos')">POS Satış</div>
-            <div class="nav-link" onclick="switchTab('inventory')">Ürün Yönetimi</div>
-            <div class="nav-link" onclick="switchTab('reports')">Günlük Rapor</div>
-            <div class="nav-link" style="color: #ef4444;" onclick="logout()">Güvenli Çıkış</div>
+            <div class="nav-link active" onclick="switchTab('pos', this)">
+                <span>⚡</span> Hızlı Satış
+            </div>
+            <div class="nav-link" onclick="switchTab('inventory', this)">
+                <span>📦</span> Ürünler
+            </div>
+            <div class="nav-link" onclick="switchTab('reports', this)">
+                <span>📋</span> Raporlar
+            </div>
+            <div class="nav-link" onclick="switchTab('debts', this)">
+                <span>📖</span> Veresiye
+            </div>
+            <div class="nav-link" onclick="switchTab('analysis', this)">
+                <span>📊</span> Analiz
+            </div>
+            <div class="nav-link" style="color:#f87171 !important; margin-left: 20px; border: 1px solid rgba(248,113,113,0.2);" onclick="logout()">
+                <span>🚪</span> Çıkış
+            </div>
         </div>
     </nav>
-
     <div class="main-container">
         <div id="pos" class="tab-content active">
+            <input type="text" id="productSearch" placeholder="Ürün Ara..." oninput="renderProducts()" style="width: 300px; padding: 10px; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 15px;">
             <div class="pos-grid">
                 <div class="products-area" id="productGrid"></div>
-                
                 <div class="cart-area">
-                    <h3 style="margin-top: 0;">🛒 Güncel Sepet</h3>
+                   <div class="cart-header">
+    <h3 style="margin:0;">🛒 Sepet</h3>
+    <button class="btn-clear-cart" onclick="clearCart()">Sepeti Boşalt</button>
+</div>
                     <div class="cart-list" id="cartList"></div>
-                    <div style="font-size: 1.8rem; font-weight: 800; margin-bottom: 20px; text-align: right; color: var(--dark);">
-                        <small style="font-size: 0.9rem; font-weight: 400;">Toplam:</small> <span id="totalAmount">0.00</span>₺
-                    </div>
-                    <button class="btn-pay" style="background: #10b981;" onclick="processSale('Nakit')">NAKİT ÖDEME</button>
-                    <button class="btn-pay" style="background: #3b82f6;" onclick="processSale('Kart')">KREDİ KARTI</button>
-                    <button class="btn-pay" style="background: #f59e0b;" onclick="processSale('Veresiye')">VERESİYE DEFTERİ</button>
+                    <div style="font-size: 1.5rem; font-weight: 800; text-align: right; margin-bottom: 15px;">Toplam: <span id="totalAmount">0.00</span>₺</div>
+                    <button class="btn-pay" style="background: #22c55e;" onclick="processSale('Nakit')">NAKİT</button>
+                    <button class="btn-pay" style="background: #3b82f6;" onclick="processSale('Kart')">KART</button>
+                    <button class="btn-pay" style="background: #f59e0b;" onclick="processSale('Veresiye')">VERESİYE</button>
                 </div>
             </div>
         </div>
+       <div id="inventory" class="tab-content">
+            <div class="card" style="margin-bottom: 20px;">
+                <div class="inventory-header">
+                    <h3 style="margin:0;">📦 Yeni Ürün Tanımla</h3>
+                </div>
+                <div class="inventory-form">
+                    <div><label>Ürün Adı</label><input type="text" id="newPName" placeholder="Örn: Karışık Tost"></div>
+                    <div><label>Alış Fiyatı (₺)</label><input type="number" id="newPCost" step="0.01" placeholder="0.00"></div>
+                    <div><label>Satış Fiyatı (₺)</label><input type="number" id="newPPrice" step="0.01" placeholder="0.00"></div>
+                    <div><label>Stok Miktarı</label><input type="number" id="newPStock" placeholder="0"></div>
+                    <div><label>Kritik Seviye</label><input type="number" id="newPCritical" placeholder="5"></div>
+                    <button class="btn-pay" style="background: var(--p); width: auto; padding: 10px 25px; margin: 0;" onclick="addNewProduct()">Ekle</button>
+                </div>
+            </div>
 
-        <div id="inventory" class="tab-content">
             <div class="card">
-                <h2>📦 Yeni Ürün Ekle</h2>
-                <p style="color: #64748b; margin-bottom: 20px;">Sisteme yeni bir ürün tanımladığınızda anında POS ekranına düşer.</p>
-                <input type="text" id="newPName" placeholder="Ürün Adı (Örn: Kaşarlı Tost)">
-                <input type="number" id="newPPrice" placeholder="Satış Fiyatı (₺)">
-                <button class="btn-pay" style="background: var(--primary); width: 100%;" onclick="addNewProduct()">Ürünü Kaydet ve Yayınla</button>
+                <h3 style="margin-bottom:15px;">📋 Mevcut Ürün Portföyü</h3>
+                <table class="manage-table">
+                    <thead>
+                        <tr>
+                            <th>Ürün Adı</th>
+                            <th>Maliyet / Satış</th>
+                            <th>Kâr Durumu</th>
+                            <th>Stok / Kritik</th>
+                            <th style="text-align:right;">İşlemler</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inventoryListBody"></tbody>
+                </table>
             </div>
         </div>
-
         <div id="reports" class="tab-content">
-            <div class="card" style="max-width: 800px;">
-                <h2>📊 Son Satış İşlemleri</h2>
-                <div id="recentSalesList"></div>
+            <div class="stats-grid">
+            <div class="stat-item stat-cash"><small>💵 NAKİT</small><h3 id="repCash">0₺</h3></div>
+            <div class="stat-item stat-card"><small>💳 KART</small><h3 id="repCard">0₺</h3></div>
+            <div class="stat-item stat-debt"><small>⏳ BEKLEYEN BORÇ</small><h3 id="repDebt">0₺</h3></div>
+            <div class="stat-item stat-cost"><small>📉 MALİYET</small><h3 id="repTotalCost">0₺</h3></div>
+            <div class="stat-item stat-profit"><small>💰 NET KÂR</small><h3 id="repNetProfit">0₺</h3></div>
+        </div>
+            <div class="card"><h3>📋 İşlemler</h3><div id="recentSalesList"></div></div>
+        </div>
+        <div id="debts" class="tab-content">
+            <div class="card"><h3>📖 Borçlar</h3><table><thead><tr><th>Müşteri</th><th>Borç</th><th>İşlem</th></tr></thead><tbody id="debtListBody"></tbody></table></div>
+        </div>
+        <div id="analysis" class="tab-content">
+            <div class="card"><h3>📊 Analiz</h3><div style="height: 300px;"><canvas id="topProductsChart"></canvas></div></div>
+        </div>
+    </div>
+   <div id="customerModal" class="modal-overlay">
+        <div class="customer-modal-content">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                <h3 style="margin:0;">👤 Müşteri Seç / Ekle</h3>
+                <button onclick="closeCustomerModal()" style="background:none; border:none; cursor:pointer; font-size:1.5rem; color:#94a3b8;">&times;</button>
+            </div>
+            
+            <input type="text" id="custSearchInput" class="cust-search-box" placeholder="Müşteri adı yazın..." oninput="searchCustomers()">
+            
+            <div id="custListArea" class="customer-list">
+                </div>
+            
+            <div style="display:grid; grid-template-columns: 1.2fr 1fr; gap:10px;">
+                <button class="btn-pay" style="background:#22c55e; margin:0; font-size:0.85rem;" onclick="addNewCustomerAndSale()">✨ Yeni Müşteri Olarak Kaydet</button>
+                <button class="btn-pay" style="background:#64748b; margin:0;" onclick="closeCustomerModal()">Vazgeç</button>
             </div>
         </div>
     </div>
+    <div id="toastContainer" class="toast-container"></div>
 
+    <div id="historyModal" class="modal-overlay">
+        <div class="modal-content" style="max-width: 600px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 id="historyTitle" style="margin:0;">👤 Cari Hareketler</h3>
+                <button onclick="closeHistoryModal()" style="background:none; border:none; cursor:pointer; font-size:1.5rem;">&times;</button>
+            </div>
+            <div id="historyContent" style="max-height: 400px; overflow-y: auto;"></div>
+            <div style="margin-top:20px; text-align:right;">
+                <button class="btn-pay" style="background:var(--p); width:auto; padding:8px 20px;" onclick="closeHistoryModal()">Kapat</button>
+            </div>
+        </div>
+    </div>
+    <div id="refundModal" class="modal-overlay">
+        <div class="modal-content" style="max-width: 500px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0;">🔄 İade Edilecek Ürünü Seçin</h3>
+                <button onclick="closeRefundModal()" style="background:none; border:none; cursor:pointer; font-size:1.5rem;">&times;</button>
+            </div>
+            <div id="refundItemsList" style="max-height: 350px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 10px;">
+                </div>
+            <div style="margin-top:20px; display:flex; gap:10px;">
+                <button class="btn-pay" style="background:#64748b; margin:0;" onclick="closeRefundModal()">Vazgeç</button>
+                <button class="btn-pay" style="background:#ef4444; margin:0;" onclick="voidFullSale()">Tüm Satışı İptal Et</button>
+            </div>
+        </div>
+    </div>
+<div id="customConfirmModal" class="modal-overlay" style="z-index: 9999;">
+    <div class="customer-modal-content" style="width: 350px; text-align: center;">
+        <div id="confirmIcon" style="font-size: 3rem; margin-bottom: 15px;">⚠️</div>
+        <h3 id="confirmTitle" style="margin-bottom: 10px;">Emin misiniz?</h3>
+        <p id="confirmMessage" style="color: #64748b; font-size: 0.9rem; margin-bottom: 25px;">Bu işlem geri alınamaz.</p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <button id="confirmCancelBtn" class="btn-pay" style="background: #e2e8f0; color: #475569; margin: 0;">Vazgeç</button>
+            <button id="confirmOkBtn" class="btn-pay" style="background: #ef4444; margin: 0;">Evet, Sil</button>
+        </div>
+    </div>
+</div>
 </body>
 </html>
